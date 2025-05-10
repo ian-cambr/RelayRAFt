@@ -4,7 +4,7 @@ RelayRAFt is a Python-based graphical user interface (GUI) application designed 
 
 ## Use Case
 
-Photographers using Fujifilm cameras who shoot in RAW (.RAF) format often need to convert their images to more widely compatible or space-efficient formats for archiving, sharing, or web use. JPEG XL and AVIF offer significant advantages in terms of compression efficiency and feature sets (like HDR and lossless compression) compared to older formats like JPEG.
+Photographers using Fujifilm cameras who shoot in RAW (.RAF) format often need to convert their images to more widely compatible or space-efficient formats for archiving, sharing, or web use. JPEG XL and AVIF offer significant advantages in terms of compression efficiency and feature sets (like HDR and lossless compression) compared to older formats like JPEG. If you just want to use the tool, feel free to download the latest Windows executable from the Releases tab.
 
 This tool aims to:
 *   Simplify the batch conversion of .RAF files.
