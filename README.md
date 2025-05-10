@@ -38,7 +38,10 @@ This tool aims to:
     *   Checks for Python library dependencies (`rawpy`, `Pillow`).
     *   Verifies availability and functionality of external tools.
 
-![442365893-ea44bcf6-6e1c-4675-8595-c6afbdeec4b3](https://github.com/user-attachments/assets/b6dcd28d-13ed-4914-bc4b-7e5d2a8862e6)
+## Visual
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/b6dcd28d-13ed-4914-bc4b-7e5d2a8862e6" alt="Alt text" width="400"/>
+</p>
 
 ## Prerequisites and Setup
 
