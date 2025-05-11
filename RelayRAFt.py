@@ -171,21 +171,22 @@ def convert_raw_files_core(source_folder, output_folder,
             if status_callback: status_callback(f"Error creating output folder '{output_folder}': {e}", error=True)
             return
 
-    raf_files = [f for f in os.listdir(source_folder) if f.lower().endswith(".raf")]
-    total_files = len(raf_files)
+    supported_input_extensions = (".raf", ".png")
+    input_files = [f for f in os.listdir(source_folder) if f.lower().endswith(supported_input_extensions)]
+    total_files = len(input_files)
 
     if total_files == 0:
-        if status_callback: status_callback(f"No .RAF files found in '{source_folder}'.")
+        if status_callback: status_callback(f"No supported files (.RAF, .PNG) found in '{source_folder}'.")
         if progress_callback: progress_callback(0, 0)
         return
 
-    temp_dir_obj = tempfile.TemporaryDirectory(prefix="raf2img_")
+    temp_dir_obj = tempfile.TemporaryDirectory(prefix="img2convert_")
     temp_dir = temp_dir_obj.name
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
     try:
-        for index, filename in enumerate(raf_files):
-            raf_path = os.path.join(source_folder, filename)
+        for index, filename in enumerate(input_files):
+            original_source_file_path = os.path.join(source_folder, filename)
             base_filename = os.path.splitext(filename)[0]
             safe_base_filename = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in base_filename).rstrip()
             
@@ -194,17 +195,10 @@ def convert_raw_files_core(source_folder, output_folder,
             
             intermediate_png_path = os.path.join(temp_dir, f"{safe_base_filename}_temp.png")
 
-            output_filename_jxl = safe_base_filename + ".jxl" # For checking existence
-            output_file_full_path_jxl = os.path.join(output_folder, output_filename_jxl)
-            output_filename_avif = safe_base_filename + ".avif" # For checking existence
-            output_file_full_path_avif = os.path.join(output_folder, output_filename_avif)
-
             skip_processing = False
-            skip_reason = ""
-            if output_format_upper == "JXL" and os.path.exists(output_file_full_path_jxl):
-                skip_processing = True; skip_reason = f"Output file '{output_filename_jxl}' already exists."
-            elif output_format_upper == "AVIF" and os.path.exists(output_file_full_path_avif):
-                 skip_processing = True; skip_reason = f"Output file '{output_filename_avif}' already exists."
+            if os.path.exists(output_file_full_path):
+                skip_processing = True
+                skip_reason = f"Output file '{output_filename_with_ext}' already exists."
             
             if skip_processing:
                 if status_callback: status_callback(f"Skipping ({index+1}/{total_files}): {filename}. {skip_reason}")
@@ -212,15 +206,41 @@ def convert_raw_files_core(source_folder, output_folder,
                 continue
 
             if status_callback: status_callback(f"Processing ({index+1}/{total_files}): {filename} -> {output_filename_with_ext}")
+            
+            pil_image = None
+            is_raw_file = filename.lower().endswith(".raf")
+            is_png_file = filename.lower().endswith(".png")
 
             try:
-                if status_callback: status_callback(f"  Reading RAW: {filename}")
-                with rawpy.imread(raf_path) as raw:
-                    # MODIFIED: Changed output_bps from 16 to 8 for 24-bit RGB PNG
-                    rgb_array = raw.postprocess(use_camera_wb=True, output_bps=8,
-                                                output_color=rawpy.ColorSpace.sRGB, no_auto_bright=False)
-                pil_image = Image.fromarray(rgb_array, mode='RGB')
+                if is_raw_file:
+                    if status_callback: status_callback(f"  Reading RAW: {filename}")
+                    with rawpy.imread(original_source_file_path) as raw:
+                        rgb_array = raw.postprocess(use_camera_wb=True, output_bps=8,
+                                                    output_color=rawpy.ColorSpace.sRGB, no_auto_bright=False)
+                    pil_image = Image.fromarray(rgb_array, mode='RGB')
                 
+                elif is_png_file:
+                    if status_callback: status_callback(f"  Reading source PNG: {filename}")
+                    img_tmp = Image.open(original_source_file_path)
+                    # Determine target mode: Preserve RGBA if alpha exists or mode is Palette. Otherwise RGB.
+                    if img_tmp.mode == 'RGBA':
+                        pil_image = img_tmp
+                        if status_callback: status_callback(f"  Source PNG {filename} is RGBA.")
+                    elif img_tmp.mode == 'RGB':
+                        pil_image = img_tmp
+                        if status_callback: status_callback(f"  Source PNG {filename} is RGB.")
+                    elif 'A' in img_tmp.mode or img_tmp.info.get("transparency") or img_tmp.mode == 'P':
+                        if status_callback: status_callback(f"  Converting source PNG {filename} from mode {img_tmp.mode} to RGBA.")
+                        pil_image = img_tmp.convert('RGBA')
+                    else: # For other modes (L, CMYK etc.) without obvious alpha, convert to RGB
+                        if status_callback: status_callback(f"  Converting source PNG {filename} from mode {img_tmp.mode} to RGB.")
+                        pil_image = img_tmp.convert('RGB')
+                else: # Should not be reached if supported_input_extensions is managed properly
+                    if status_callback: status_callback(f"  Skipping unsupported file type: {filename}", warning=True)
+                    if progress_callback: progress_callback(index + 1, total_files)
+                    continue
+                
+                # Common processing for the pil_image (resizing, saving intermediate)
                 if resolution_scale != 1.0:
                     original_width, original_height = pil_image.size
                     new_width = int(original_width * resolution_scale)
@@ -231,11 +251,11 @@ def convert_raw_files_core(source_folder, output_folder,
                     else:
                         if status_callback: status_callback(f"  Warning: Invalid new dimensions for {filename}. Original size used.", warning=True)
                 
-                # MODIFIED: Log message updated to reflect 8-bit PNG
-                if status_callback: status_callback(f"  Saving intermediate 8-bit PNG: {os.path.basename(intermediate_png_path)}")
+                if status_callback: status_callback(f"  Saving intermediate PNG ({pil_image.mode}): {os.path.basename(intermediate_png_path)}")
                 pil_image.save(intermediate_png_path, format="PNG")
+
             except Exception as e:
-                if status_callback: status_callback(f"  Error processing RAW {filename} to PNG: {e}. Skipping.", error=True)
+                if status_callback: status_callback(f"  Error processing source {filename} to intermediate PNG: {e}. Skipping.", error=True)
                 if progress_callback: progress_callback(index + 1, total_files)
                 continue 
 
@@ -248,13 +268,13 @@ def convert_raw_files_core(source_folder, output_folder,
                     encoder_cmd.extend(["-q", str(quality_value)])
             elif output_format_upper == "AVIF":
                 if lossless_mode:
-                    encoder_cmd.extend(["-q", "100", "--depth", "10", "--yuv", "444"])
+                    encoder_cmd.extend(["-q", "100", "--depth", "10", "--yuv", "444"]) # Assuming q 100 is lossless for this avifenc
                 else:
                     encoder_cmd.extend(["-q", str(quality_value), "--depth", "10", "--yuv", "444"])
 
             encoding_successful = False
             try:
-                if status_callback: status_callback(f"  Encoding to {output_format_upper} (Lossless: {lossless_mode}, GUI Quality: {quality_value if not lossless_mode else '100'}): {output_filename_with_ext}")
+                if status_callback: status_callback(f"  Encoding to {output_format_upper} (Lossless: {lossless_mode}, GUI Quality: {quality_value if not lossless_mode else 'N/A'}): {output_filename_with_ext}")
                 
                 process = subprocess.run(encoder_cmd, capture_output=True, text=True, check=True, creationflags=creation_flags)
                 
@@ -283,8 +303,8 @@ def convert_raw_files_core(source_folder, output_folder,
                 if _EXIFTOOL_AVAILABLE:
                     exiftool_cmd = [
                     EXIFTOOL_EXECUTABLE_PATH,
-                    "-tagsFromFile", raf_path,
-                    # Camera-related metadata
+                    "-tagsFromFile", original_source_file_path, # Source metadata from original RAF or PNG
+                    # Camera-related metadata (may not exist in all PNGs)
                     "-Make", "-Model",
                     "-Artist", "-Copyright",
                     "-DateTimeOriginal", "-CreateDate", "-ModifyDate",
@@ -295,57 +315,66 @@ def convert_raw_files_core(source_folder, output_folder,
                     "-GPSLatitude", "-GPSLongitude", "-GPSAltitude",
                     "-GPSLatitudeRef", "-GPSLongitudeRef", "-GPSAltitudeRef",
                     "-GPSTimeStamp", "-GPSDateStamp",
-                    # Descriptive metadata
+                    # Descriptive metadata (common in PNGs too via tEXt/iTXt/zTXt chunks)
                     "-Title", "-Description", "-Keywords", "-Subject",
-                    "-Creator", "-Rights",
+                    "-Creator", "-Rights", 
+                    # PNG Specific (ExifTool might map some of these from PNG chunks)
+                    # "-PNG:Title", "-PNG:Author", "-PNG:Description", # etc. -tagsFromFile handles this well.
                     # Miscellaneous
-                    "-m", "-overwrite_original",
+                    "-m", "-overwrite_original", # -m ignores minor errors
                     output_file_full_path
                 ]
 
-                try:
-                    env = os.environ.copy()
-                    env['LANG'] = 'C.UTF-8'
-                    exif_process = subprocess.run(
-                        exiftool_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                        creationflags=creation_flags,
-                        env=env
-                    )
+                    try:
+                        env = os.environ.copy()
+                        env['LANG'] = 'C.UTF-8' # For consistent ExifTool output parsing
+                        exif_process = subprocess.run(
+                            exiftool_cmd,
+                            capture_output=True,
+                            text=True,
+                            check=True, # check=True can be problematic if some tags are not found, -m helps
+                            creationflags=creation_flags,
+                            env=env
+                        )
 
-                    if exif_process.stdout and status_callback:
-                        for line in exif_process.stdout.splitlines():
-                            if line.strip():
-                                if "image files updated" in line.lower() or "image files created" in line.lower():
-                                    status_callback(f"      ExifTool: {line.strip()}")
-                                else:
-                                    status_callback(f"      ExifTool (info): {line.strip()}")
+                        if exif_process.stdout and status_callback:
+                            for line in exif_process.stdout.splitlines():
+                                if line.strip():
+                                    if "image files updated" in line.lower() or "image files created" in line.lower():
+                                        status_callback(f"      ExifTool: {line.strip()}")
+                                    else:
+                                        status_callback(f"      ExifTool (info): {line.strip()}")
 
-                    if exif_process.stderr and status_callback:
-                        for line in exif_process.stderr.splitlines():
-                            if line.strip():
-                                status_callback(f"      ExifTool (stderr/warning): {line.strip()}", warning=True)
+                        if exif_process.stderr and status_callback:
+                            for line in exif_process.stderr.splitlines():
+                                if line.strip():
+                                    status_callback(f"      ExifTool (stderr/warning): {line.strip()}", warning=True)
+                        
+                        # Check if ExifTool actually updated the file, not just printed info
+                        # This is a bit tricky as output varies. "1 image files updated" is a good sign.
+                        # If no "updated" message, but no errors, assume it tried.
+                        if "1 image files updated" in exif_process.stdout.lower():
+                             if status_callback: status_callback(f"    Successfully copied metadata to {output_filename_with_ext}")
+                        else:
+                             if status_callback: status_callback(f"    ExifTool processed metadata for {output_filename_with_ext}. (Check ExifTool logs for details)", warning=True)
 
-                    if status_callback:
-                        status_callback(f"    Successfully copied safe metadata (including GPS) to {output_filename_with_ext}")
 
-                except subprocess.CalledProcessError as e_exif:
-                    if status_callback:
-                        status_callback(f"    Error copying metadata to {output_filename_with_ext} using ExifTool. File is encoded, but metadata may be missing/original.", error=True)
-                        status_callback(f"      ExifTool Command: {' '.join(e_exif.cmd)}", error=True)
-                        status_callback(f"      Return Code: {e_exif.returncode}", error=True)
-                        status_callback(f"      Stdout: {e_exif.stdout.strip() if e_exif.stdout else ''}", error=True)
-                        status_callback(f"      Stderr: {e_exif.stderr.strip() if e_exif.stderr else ''}", error=True)
-                except FileNotFoundError:
-                    if status_callback: status_callback(f"Error: '{EXIFTOOL_EXECUTABLE_PATH}' not found during metadata copy. Disabling ExifTool for this session.", error=True)
-                    _EXIFTOOL_AVAILABLE = False 
-                except Exception as e_exif_other:
-                    if status_callback: status_callback(f"    Unexpected error during ExifTool operation for {output_filename_with_ext}: {e_exif_other}", error=True)
+                    except subprocess.CalledProcessError as e_exif:
+                        if status_callback:
+                            status_callback(f"    Error/Warning during metadata copy to {output_filename_with_ext} using ExifTool. File is encoded, but metadata transfer might be incomplete/failed.", warning=True) # Changed to warning as file is still good
+                            status_callback(f"      ExifTool Command: {' '.join(e_exif.cmd)}", warning=True)
+                            status_callback(f"      Return Code: {e_exif.returncode}", warning=True)
+                            status_callback(f"      Stdout: {e_exif.stdout.strip() if e_exif.stdout else ''}", warning=True)
+                            status_callback(f"      Stderr: {e_exif.stderr.strip() if e_exif.stderr else ''}", warning=True)
+                    except FileNotFoundError:
+                        if status_callback: status_callback(f"Error: '{EXIFTOOL_EXECUTABLE_PATH}' not found during metadata copy. Disabling ExifTool for this session.", error=True)
+                        _EXIFTOOL_AVAILABLE = False 
+                    except Exception as e_exif_other:
+                        if status_callback: status_callback(f"    Unexpected error during ExifTool operation for {output_filename_with_ext}: {e_exif_other}", error=True)
                 
-            elif status_callback: 
-                status_callback(f"    Skipping metadata copy: ExifTool is not available or not configured correctly. Last status: {_EXIFTOOL_VERSION_INFO}", warning=True)
+                elif copy_metadata and not _EXIFTOOL_AVAILABLE: # Only log if user wanted metadata
+                    if status_callback: 
+                        status_callback(f"    Skipping metadata copy: ExifTool is not available or not configured correctly. Last status: {_EXIFTOOL_VERSION_INFO}", warning=True)
 
             if progress_callback:
                 progress_callback(index + 1, total_files)
@@ -360,7 +389,7 @@ def convert_raw_files_core(source_folder, output_folder,
 class RAFConverterApp:
     def __init__(self, root_window):
         self.root = root_window
-        self.root.title("RAF Converter (cjxl.exe / avifenc.exe / exiftool.exe)")
+        self.root.title("Image Converter (cjxl / avifenc / exiftool)") # MODIFIED Title
         self.root.geometry("750x980") 
 
         self.source_folder_var = tk.StringVar(value=DEFAULT_INPUT_FOLDER_PATH)
@@ -379,7 +408,7 @@ class RAFConverterApp:
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.pack(expand=True, fill=tk.BOTH)
 
-        title_label = ttk.Label(main_frame, text="RAF to JXL/AVIF Batch Converter", font=("Arial", 16, "bold"))
+        title_label = ttk.Label(main_frame, text="Image (RAF/PNG) to JXL/AVIF Converter", font=("Arial", 16, "bold")) # MODIFIED Label
         title_label.pack(pady=(0, 15))
 
         tool_config_main_frame = ttk.LabelFrame(main_frame, text="External Tool Configuration", padding="10")
@@ -417,7 +446,7 @@ class RAFConverterApp:
 
         folder_frame = ttk.LabelFrame(main_frame, text="Folder Selection", padding="10")
         folder_frame.pack(fill=tk.X, pady=10)
-        ttk.Label(folder_frame, text="Source RAF Folder:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(folder_frame, text="Source Folder (RAF/PNG):").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W) # MODIFIED Label
         source_entry = ttk.Entry(folder_frame, textvariable=self.source_folder_var, width=50)
         source_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
         ttk.Button(folder_frame, text="Browse...", command=self.browse_source_folder).grid(row=0, column=2, padx=5, pady=5)
@@ -575,7 +604,7 @@ class RAFConverterApp:
         initial_dir = self.source_folder_var.get()
         if not os.path.isdir(initial_dir): initial_dir = os.path.dirname(initial_dir)
         if not os.path.exists(initial_dir): initial_dir = APPLICATION_PATH 
-        folder_selected = filedialog.askdirectory(title="Select Source RAF Folder", initialdir=initial_dir)
+        folder_selected = filedialog.askdirectory(title="Select Source Image Folder (RAF/PNG)", initialdir=initial_dir) # MODIFIED Title
         if folder_selected:
             self.source_folder_var.set(folder_selected)
             self.log_status(f"Source folder selected: {folder_selected}")
@@ -606,9 +635,11 @@ class RAFConverterApp:
              self.log_status(f"{encoder_type_to_check}.exe is not configured correctly. Please check the path and try again.", error=True)
              return
 
-        if self.copy_metadata_var.get() and not _EXIFTOOL_AVAILABLE:
-            self.log_status(f"Metadata copying is enabled, but exiftool.exe is not available or configured. Last status: {_EXIFTOOL_VERSION_INFO}. Metadata will not be copied.", warning=True)
-            
+        if self.copy_metadata_var.get() and not _EXIFTOOL_AVAILABLE: # Check ExifTool availability if metadata copy is enabled
+            if not self.check_tool_path_from_gui("exiftool"): # Try to check again, might have been fixed
+                 self.log_status(f"Metadata copying is enabled, but exiftool.exe is not available or configured. Last status: {_EXIFTOOL_VERSION_INFO}. Metadata will not be copied.", warning=True)
+            # If check_tool_path_from_gui("exiftool") now passes, _EXIFTOOL_AVAILABLE will be true, and metadata will be attempted.
+
         source, output = self.source_folder_var.get(), self.output_folder_var.get()
         try:
             resolution_scale_value = float(self.resolution_scale_var.get())
